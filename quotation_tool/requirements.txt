@@ -1,2 +1,5 @@
+# pytesseract を使うには OS 側に Tesseract OCR 本体が必要
+# 例(Debian/Ubuntu): sudo apt-get install -y tesseract-ocr tesseract-ocr-jpn
 reportlab
 pdfplumber
+pytesseract
