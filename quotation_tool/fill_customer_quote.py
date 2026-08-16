@@ -66,12 +66,16 @@ def compute_items(items, markup, round_unit):
     return computed
 
 
-def print_preview(computed, reply_to_lines):
+def print_preview(computed, reply_to_lines, notes):
     subtotal = sum(c["amount"] for c in computed)
     print("=" * 72)
     print("宛先を次の内容に書き換えます:")
     for line in reply_to_lines:
         print(f"  {line}")
+    if notes:
+        print("備考として次を記載します:")
+        for note in notes:
+            print(f"  {note}")
     print("-" * 72)
     print(f"{'行':<5}{'品名':<14}{'規格':<16}{'数量':>5}{'仕入単価':>11}{'提出単価':>11}{'金額':>11}")
     for c in computed:
@@ -90,7 +94,7 @@ def confirm(prompt="この内容で回答PDFに書き込みますか? [y/N]: "):
     return ans in ("y", "yes")
 
 
-def build_overlay(computed, tpl, page_width, page_height, reply_to_lines):
+def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(page_width, page_height))
 
@@ -108,6 +112,16 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines):
         for i, line in enumerate(reply_to_lines):
             baseline_from_top = y0_top + line_gap * (i + 1) - line_gap * 0.35
             c.drawString(x0 + 6, page_height - baseline_from_top, line)
+
+    note_area = tpl.get("note_area_pt")
+    if notes and note_area:
+        x0, y0_top, x1, y1_bottom = note_area
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont(FONT_NAME, 11)
+        line_gap = (y1_bottom - y0_top) / max(len(notes), 1)
+        for i, note in enumerate(notes):
+            baseline_from_top = y0_top + line_gap * (i + 1) - line_gap * 0.25
+            c.drawString(x0, page_height - baseline_from_top, note)
 
     c.setFont(FONT_NAME, 10)
     cols = tpl["columns_pt"]
@@ -139,6 +153,7 @@ def main():
     parser.add_argument("--round-unit", type=int, default=DEFAULT_ROUND_UNIT, help="繰り上げ単位(既定100円)")
     parser.add_argument("--page", type=int, default=0, help="書き込み対象ページ番号(0始まり、既定0)")
     parser.add_argument("--reply-to", action="append", help="宛先の書き換え文言(1行ずつ指定、複数回指定可)。省略時はテンプレート定義を使用")
+    parser.add_argument("--note", action="append", help="仕入先回答の手書き備考など、書き加える一言(1行ずつ指定、複数回指定可)")
     parser.add_argument("--yes", action="store_true", help="確認プロンプトをスキップする")
     args = parser.parse_args()
 
@@ -148,6 +163,7 @@ def main():
         items = json.load(f)
 
     reply_to_lines = args.reply_to if args.reply_to else tpl.get("reply_to_lines", [])
+    notes = args.note or []
 
     try:
         computed = compute_items(items, args.markup, args.round_unit)
@@ -155,7 +171,7 @@ def main():
         print(f"エラー: {e}")
         sys.exit(1)
 
-    print_preview(computed, reply_to_lines)
+    print_preview(computed, reply_to_lines, notes)
 
     if not args.yes and not confirm():
         print("出力を中止しました。")
@@ -165,7 +181,7 @@ def main():
         page = plumber_pdf.pages[args.page]
         page_width, page_height = page.width, page.height
 
-    overlay_buf = build_overlay(computed, tpl, page_width, page_height, reply_to_lines)
+    overlay_buf = build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes)
     overlay_reader = pypdf.PdfReader(overlay_buf)
 
     reader = pypdf.PdfReader(args.pdf)

@@ -12,6 +12,7 @@
   },
   "header_redact_pt": [90, 55, 275, 138],
   "reply_to_lines": ["みなみ興業　御中", "南　様"],
+  "note_area_pt": [34, 287, 300, 312],
   "header_band_pt": [313.44, 338.64],
   "row_bands_pt": [
     [338.64, 364.32],
