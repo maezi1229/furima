@@ -4,7 +4,7 @@
 想定する業務フロー:
   1. 客先からPDF(またはFAX)で見積依頼が来る
   2. 仕入れ先に転送し、仕入単価入りの回答(PDFへの手書き書き込み・メール等)を受け取る
-  3. 仕入単価に対して一定の掛け率(既定10%)を上乗せし、100円未満を切り捨てる
+  3. 仕入単価に対して一定の掛け率(既定10%)を上乗せし、100円単位で繰り上げる
   4. 品目ごとの単価・数量・金額をまとめ、客先に提出する見積書PDFを作成する
 
 このツールは上記の 3, 4 を自動化する。品目データ(品名・数量・仕入単価)は
@@ -43,6 +43,7 @@ import json
 import math
 import sys
 from datetime import date
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -62,10 +63,17 @@ DEFAULT_MARKUP = 0.10
 DEFAULT_ROUND_UNIT = 100
 
 
-def round_down(value, unit):
-    if unit <= 0:
-        return value
-    return math.floor(value / unit) * unit
+def compute_unit_price(unit_cost, markup, round_unit):
+    """仕入単価に上乗せ率を掛け、round_unit単位で繰り上げる。
+    浮動小数点誤差(例: 42000*1.1が46200.00000000001になる)で正しい金額の
+    ちょうど倍数が誤って一段階切り上がらないよう、Decimalで厳密に計算する。
+    """
+    d_cost = Decimal(str(unit_cost))
+    d_markup = Decimal(str(markup))
+    d_unit = Decimal(str(round_unit))
+    marked_up = d_cost * (Decimal(1) + d_markup)
+    rounded = (marked_up / d_unit).to_integral_value(rounding=ROUND_CEILING) * d_unit
+    return int(rounded)
 
 
 def load_json(path):
@@ -78,7 +86,7 @@ def compute_items(items, markup, round_unit):
     for it in items:
         qty = it["qty"]
         unit_cost = it["unit_cost"]
-        unit_price = round_down(unit_cost * (1 + markup), round_unit)
+        unit_price = compute_unit_price(unit_cost, markup, round_unit)
         amount = unit_price * qty
         computed.append(
             {
@@ -95,7 +103,7 @@ def compute_items(items, markup, round_unit):
 
 def print_preview(computed, customer, tax_rate):
     subtotal = sum(c["amount"] for c in computed)
-    tax = round_down(subtotal * tax_rate, 1) if tax_rate else 0
+    tax = math.floor(subtotal * tax_rate) if tax_rate else 0
     total = subtotal + tax
 
     print("=" * 72)
@@ -199,7 +207,7 @@ def main():
     parser.add_argument("--customer", required=True, help="客先情報(JSON)へのパス")
     parser.add_argument("--output", required=True, help="出力するPDFのパス")
     parser.add_argument("--markup", type=float, default=DEFAULT_MARKUP, help="上乗せ率(既定 0.10 = 10%%)")
-    parser.add_argument("--round-unit", type=int, default=DEFAULT_ROUND_UNIT, help="切り捨て単位(既定 100円)")
+    parser.add_argument("--round-unit", type=int, default=DEFAULT_ROUND_UNIT, help="繰り上げ単位(既定 100円)")
     parser.add_argument("--tax-rate", type=float, default=0.0, help="消費税率。既定は0(税抜のみ表示)")
     parser.add_argument("--yes", action="store_true", help="確認プロンプトをスキップして出力する")
     args = parser.parse_args()

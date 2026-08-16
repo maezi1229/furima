@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""items.json(仕入単価入り)から提出単価・金額を計算し、客先からの見積り依頼
+FAXと同じ用紙レイアウトに単価・金額を書き込んだ回答PDFを作成する。
+
+これまで手作業で「客先の元FAXに単価・数量・合計金額を手書きして返送」して
+いた工程を自動化するもの。仕入単価(unit_cost)は read_request.py が作った
+items.json 雛形に手入力しておくこと(手書きの仕入回答をOCRするのは精度が
+低いため非対応)。
+
+処理:
+  1. 仕入単価に対して上乗せ率(既定10%)を掛け、100円単位で繰り上げて提出単価とする
+  2. 提出単価 × 数量 で金額を算出する
+  3. 計算結果をプレビュー表示し、確認を求める
+  4. 確認後、客先FAXの単価欄・金額欄に値を書き込み、あわせて宛先(会社名・宛名)を
+     依頼元(客先)宛てに書き換えたPDFを出力する。客先の手書き備考(納期質問等)は
+     元のFAX画像をそのまま使うため、書き換え対象外の場所であれば自動的に残る。
+
+使い方:
+  python3 fill_customer_quote.py \
+    --pdf 客先FAX.pdf --template templates/minami_kogyo_v1.json \
+    --items items.json --output 回答.pdf
+"""
+
+import argparse
+import io
+import json
+import sys
+from decimal import ROUND_CEILING, Decimal
+
+import pdfplumber
+import pypdf
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfgen import canvas
+
+FONT_NAME = "HeiseiKakuGo-W5"
+pdfmetrics.registerFont(UnicodeCIDFont(FONT_NAME))
+
+DEFAULT_MARKUP = 0.10
+DEFAULT_ROUND_UNIT = 100
+
+
+def compute_unit_price(unit_cost, markup, round_unit):
+    """仕入単価に上乗せ率を掛け、round_unit単位で繰り上げる。
+    浮動小数点誤差(例: 42000*1.1が46200.00000000001になる)で正しい金額の
+    ちょうど倍数が誤って一段階切り上がらないよう、Decimalで厳密に計算する。
+    """
+    d_cost = Decimal(str(unit_cost))
+    d_markup = Decimal(str(markup))
+    d_unit = Decimal(str(round_unit))
+    marked_up = d_cost * (Decimal(1) + d_markup)
+    rounded = (marked_up / d_unit).to_integral_value(rounding=ROUND_CEILING) * d_unit
+    return int(rounded)
+
+
+def compute_items(items, markup, round_unit):
+    computed = []
+    for it in items:
+        if it.get("unit_cost") is None:
+            raise ValueError(f"row{it.get('row')} ({it.get('name')}) の unit_cost が未入力です")
+        qty = it["qty"]
+        unit_cost = it["unit_cost"]
+        unit_price = compute_unit_price(unit_cost, markup, round_unit)
+        amount = unit_price * qty
+        computed.append({**it, "unit_price": unit_price, "amount": amount})
+    return computed
+
+
+def print_preview(computed, reply_to_lines):
+    subtotal = sum(c["amount"] for c in computed)
+    print("=" * 72)
+    print("宛先を次の内容に書き換えます:")
+    for line in reply_to_lines:
+        print(f"  {line}")
+    print("-" * 72)
+    print(f"{'行':<5}{'品名':<14}{'規格':<16}{'数量':>5}{'仕入単価':>11}{'提出単価':>11}{'金額':>11}")
+    for c in computed:
+        print(
+            f"row{c['row']:<2}{c['name'][:14]:<14}{c['spec'][:16]:<16}{c['qty']:>5}"
+            f"{c['unit_cost']:>11,}{c['unit_price']:>11,}{c['amount']:>11,}"
+        )
+    print("-" * 72)
+    print(f"合計: {subtotal:,} 円")
+    print("=" * 72)
+    return subtotal
+
+
+def confirm(prompt="この内容で回答PDFに書き込みますか? [y/N]: "):
+    ans = input(prompt).strip().lower()
+    return ans in ("y", "yes")
+
+
+def build_overlay(computed, tpl, page_width, page_height, reply_to_lines):
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(page_width, page_height))
+
+    redact = tpl.get("header_redact_pt")
+    if redact:
+        x0, y0_top, x1, y1_bottom = redact
+        rect_y = page_height - y1_bottom
+        rect_h = y1_bottom - y0_top
+        c.setFillColorRGB(1, 1, 1)
+        c.rect(x0, rect_y, x1 - x0, rect_h, fill=1, stroke=0)
+
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont(FONT_NAME, 15)
+        line_gap = rect_h / max(len(reply_to_lines), 1)
+        for i, line in enumerate(reply_to_lines):
+            baseline_from_top = y0_top + line_gap * (i + 1) - line_gap * 0.35
+            c.drawString(x0 + 6, page_height - baseline_from_top, line)
+
+    c.setFont(FONT_NAME, 10)
+    cols = tpl["columns_pt"]
+    padding = 4
+
+    for item in computed:
+        row_band = tpl["row_bands_pt"][item["row"] - 1]
+        row_top, row_bottom = row_band
+        y_center = page_height - (row_top + row_bottom) / 2 - 3.5
+
+        unit_price_x = cols["unit_price"][1] - padding
+        c.drawRightString(unit_price_x, y_center, f"@{item['unit_price']:,}")
+
+        amount_x = cols["amount"][1] - padding
+        c.drawRightString(amount_x, y_center, f"¥{item['amount']:,}")
+
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+def main():
+    parser = argparse.ArgumentParser(description="客先FAXに単価・金額を書き込んだ回答PDFを作る")
+    parser.add_argument("--pdf", required=True, help="客先からの見積り依頼PDF(書き込み先の元帳票)")
+    parser.add_argument("--template", required=True, help="帳票レイアウト定義(templates/*.json)")
+    parser.add_argument("--items", required=True, help="仕入単価入りのitems.json(read_request.py出力+手入力)")
+    parser.add_argument("--output", required=True, help="出力する回答PDFのパス")
+    parser.add_argument("--markup", type=float, default=DEFAULT_MARKUP, help="上乗せ率(既定0.10=10%%)")
+    parser.add_argument("--round-unit", type=int, default=DEFAULT_ROUND_UNIT, help="繰り上げ単位(既定100円)")
+    parser.add_argument("--page", type=int, default=0, help="書き込み対象ページ番号(0始まり、既定0)")
+    parser.add_argument("--reply-to", action="append", help="宛先の書き換え文言(1行ずつ指定、複数回指定可)。省略時はテンプレート定義を使用")
+    parser.add_argument("--yes", action="store_true", help="確認プロンプトをスキップする")
+    args = parser.parse_args()
+
+    with open(args.template, encoding="utf-8") as f:
+        tpl = json.load(f)
+    with open(args.items, encoding="utf-8") as f:
+        items = json.load(f)
+
+    reply_to_lines = args.reply_to if args.reply_to else tpl.get("reply_to_lines", [])
+
+    try:
+        computed = compute_items(items, args.markup, args.round_unit)
+    except ValueError as e:
+        print(f"エラー: {e}")
+        sys.exit(1)
+
+    print_preview(computed, reply_to_lines)
+
+    if not args.yes and not confirm():
+        print("出力を中止しました。")
+        sys.exit(0)
+
+    with pdfplumber.open(args.pdf) as plumber_pdf:
+        page = plumber_pdf.pages[args.page]
+        page_width, page_height = page.width, page.height
+
+    overlay_buf = build_overlay(computed, tpl, page_width, page_height, reply_to_lines)
+    overlay_reader = pypdf.PdfReader(overlay_buf)
+
+    reader = pypdf.PdfReader(args.pdf)
+    writer = pypdf.PdfWriter()
+    for i, page in enumerate(reader.pages):
+        if i == args.page:
+            page.merge_page(overlay_reader.pages[0])
+        writer.add_page(page)
+
+    with open(args.output, "wb") as f:
+        writer.write(f)
+
+    print(f"回答PDFを出力しました: {args.output}")
+
+
+if __name__ == "__main__":
+    main()
