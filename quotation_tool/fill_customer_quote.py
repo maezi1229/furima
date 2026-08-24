@@ -130,7 +130,7 @@ def draw_note_block(c, area, texts, page_height, fontsize=11):
         c.drawString(x0, page_height - baseline_from_top, text)
 
 
-def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes):
+def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(page_width, page_height))
 
@@ -154,6 +154,16 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes,
 
     cols = tpl["columns_pt"]
     padding = 4
+
+    if row_notes:
+        row_note_x0 = cols["material"][0]
+        row_note_x1 = cols["dimension"][1]
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont(FONT_NAME, 8)
+        for row_num, text in row_notes.items():
+            row_top, row_bottom = tpl["row_bands_pt"][row_num - 1]
+            y_center = page_height - (row_top + row_bottom) / 2 - 3
+            c.drawString(row_note_x0 + 2, y_center, text)
 
     for item in computed:
         row_band = tpl["row_bands_pt"][item["row"] - 1]
@@ -195,6 +205,11 @@ def main():
     parser.add_argument("--reply-to", action="append", help="宛先の書き換え文言(1行ずつ指定、複数回指定可)。省略時はテンプレート定義を使用")
     parser.add_argument("--note", action="append", help="材質欄付近(タイトル直下)に書き加える備考(1行ずつ指定、複数回指定可)")
     parser.add_argument("--reply-note", action="append", help="文末に書き加える回答コメント(納期回答等、1行ずつ指定、複数回指定可)")
+    parser.add_argument(
+        "--row-note",
+        action="append",
+        help="表内の特定の行(材質・寸法欄)に書き加える備考。'行番号:テキスト' の形式で指定(複数回指定可)。例: --row-note '10:別途 運賃:混載便4,500円 または チャーター便47,000円'",
+    )
     parser.add_argument("--yes", action="store_true", help="確認プロンプトをスキップする")
     args = parser.parse_args()
 
@@ -207,6 +222,11 @@ def main():
     notes = args.note or []
     reply_notes = args.reply_note or []
 
+    row_notes = {}
+    for entry in args.row_note or []:
+        row_str, _, text = entry.partition(":")
+        row_notes[int(row_str)] = text
+
     try:
         computed = compute_items(items, args.markup, args.round_unit)
     except ValueError as e:
@@ -214,6 +234,11 @@ def main():
         sys.exit(1)
 
     print_preview(computed, reply_to_lines, notes, reply_notes)
+    if row_notes:
+        print("表内の特定行に次を記載します:")
+        for row_num, text in sorted(row_notes.items()):
+            print(f"  row{row_num}: {text}")
+        print("=" * 72)
 
     if not args.yes and not confirm():
         print("出力を中止しました。")
@@ -223,7 +248,7 @@ def main():
         page = plumber_pdf.pages[args.page]
         page_width, page_height = page.width, page.height
 
-    overlay_buf = build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes)
+    overlay_buf = build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes)
     overlay_reader = pypdf.PdfReader(overlay_buf)
 
     reader = pypdf.PdfReader(args.pdf)
