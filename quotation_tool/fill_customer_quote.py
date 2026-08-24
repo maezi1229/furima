@@ -54,20 +54,30 @@ def compute_unit_price(unit_cost, markup, round_unit):
 
 
 def compute_items(items, markup, round_unit):
+    """unit_costは単一の数値、または材質別の複数単価(例: 国内材/ポスコ材)を
+    表す {ラベル: 仕入単価} の辞書のどちらでもよい。辞書の場合は提出単価・
+    金額もラベルごとの辞書になる。
+    """
     computed = []
     for it in items:
         if it.get("unit_cost") is None:
             raise ValueError(f"row{it.get('row')} ({it.get('name')}) の unit_cost が未入力です")
         qty = it["qty"]
         unit_cost = it["unit_cost"]
-        unit_price = compute_unit_price(unit_cost, markup, round_unit)
-        amount = unit_price * qty
+        if isinstance(unit_cost, dict):
+            unit_price = {label: compute_unit_price(cost, markup, round_unit) for label, cost in unit_cost.items()}
+            amount = {label: price * qty for label, price in unit_price.items()}
+        else:
+            unit_price = compute_unit_price(unit_cost, markup, round_unit)
+            amount = unit_price * qty
         computed.append({**it, "unit_price": unit_price, "amount": amount})
     return computed
 
 
 def print_preview(computed, reply_to_lines, notes, reply_notes):
-    subtotal = sum(c["amount"] for c in computed)
+    scalar_amounts = [c["amount"] for c in computed if not isinstance(c["amount"], dict)]
+    subtotal = sum(scalar_amounts)
+    has_dict_items = any(isinstance(c["amount"], dict) for c in computed)
     print("=" * 72)
     print("宛先を次の内容に書き換えます:")
     for line in reply_to_lines:
@@ -83,12 +93,22 @@ def print_preview(computed, reply_to_lines, notes, reply_notes):
     print("-" * 72)
     print(f"{'行':<5}{'品名':<14}{'規格':<16}{'数量':>5}{'仕入単価':>11}{'提出単価':>11}{'金額':>11}")
     for c in computed:
-        print(
-            f"row{c['row']:<2}{c['name'][:14]:<14}{c['spec'][:16]:<16}{c['qty']:>5}"
-            f"{c['unit_cost']:>11,}{c['unit_price']:>11,}{c['amount']:>11,}"
-        )
+        if isinstance(c["unit_cost"], dict):
+            print(f"row{c['row']:<2}{c['name'][:14]:<14}{c['spec'][:16]:<16}{c['qty']:>5}")
+            for label, cost in c["unit_cost"].items():
+                price = c["unit_price"][label]
+                amt = c["amount"][label]
+                print(f"    - {label:<10}{'':<16}{'':<5}{cost:>11,}{price:>11,}{amt:>11,}")
+        else:
+            print(
+                f"row{c['row']:<2}{c['name'][:14]:<14}{c['spec'][:16]:<16}{c['qty']:>5}"
+                f"{c['unit_cost']:>11,}{c['unit_price']:>11,}{c['amount']:>11,}"
+            )
     print("-" * 72)
-    print(f"合計: {subtotal:,} 円")
+    if has_dict_items:
+        print(f"合計(単一単価の行のみ): {subtotal:,} 円 ※材質別単価の行は客先が選ぶため合計に含めていません")
+    else:
+        print(f"合計: {subtotal:,} 円")
     print("=" * 72)
     return subtotal
 
@@ -132,20 +152,31 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes,
     draw_note_block(c, tpl.get("note_area_pt"), notes, page_height, fontsize=11)
     draw_note_block(c, tpl.get("reply_note_area_pt"), reply_notes, page_height, fontsize=11)
 
-    c.setFont(FONT_NAME, 10)
     cols = tpl["columns_pt"]
     padding = 4
 
     for item in computed:
         row_band = tpl["row_bands_pt"][item["row"] - 1]
         row_top, row_bottom = row_band
-        y_center = page_height - (row_top + row_bottom) / 2 - 3.5
-
         unit_price_x = cols["unit_price"][1] - padding
-        c.drawRightString(unit_price_x, y_center, f"@{item['unit_price']:,}")
 
-        amount_x = cols["amount"][1] - padding
-        c.drawRightString(amount_x, y_center, f"¥{item['amount']:,}")
+        if isinstance(item["unit_price"], dict):
+            labels = list(item["unit_price"].keys())
+            c.setFont(FONT_NAME, 7.5)
+            line_gap = (row_bottom - row_top) / max(len(labels), 1)
+            for i, label in enumerate(labels):
+                price = item["unit_price"][label]
+                baseline_from_top = row_top + line_gap * (i + 1) - line_gap * 0.3
+                c.drawRightString(unit_price_x, page_height - baseline_from_top, f"{label}@{price:,}")
+        else:
+            c.setFont(FONT_NAME, 10)
+            y_center = page_height - (row_top + row_bottom) / 2 - 3.5
+            c.drawRightString(unit_price_x, y_center, f"@{item['unit_price']:,}")
+
+        if "amount" in cols and not isinstance(item["amount"], dict):
+            y_center = page_height - (row_top + row_bottom) / 2 - 3.5
+            amount_x = cols["amount"][1] - padding
+            c.drawRightString(amount_x, y_center, f"¥{item['amount']:,}")
 
     c.save()
     buf.seek(0)
