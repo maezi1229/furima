@@ -25,6 +25,7 @@ import argparse
 import io
 import json
 import sys
+import tempfile
 from decimal import ROUND_CEILING, Decimal
 
 import pdfplumber
@@ -38,6 +39,30 @@ pdfmetrics.registerFont(UnicodeCIDFont(FONT_NAME))
 
 DEFAULT_MARKUP = 0.10
 DEFAULT_ROUND_UNIT = 100
+
+
+def normalize_rotation(pdf_path):
+    """スキャンされたFAXの中には、ページの実体は横向きのまま /Rotate で縦表示
+    しているものがある。pdfplumberが返す width/height は表示上の(回転後の)
+    寸法だが、reportlabのオーバーレイやpypdfのmerge_pageはページ本来の
+    (回転前の)座標系で扱うため、/Rotateがあると単価・備考の書き込み位置が
+    ずれたり回転して表示されるバグになる。/Rotateが立っているページは
+    transfer_rotation_to_content() で回転をコンテンツ自体に焼き込み、
+    以降はどのページも /Rotate=0 の状態で統一して扱えるようにする。
+    """
+    reader = pypdf.PdfReader(pdf_path)
+    if all(page.rotation == 0 for page in reader.pages):
+        return pdf_path
+
+    writer = pypdf.PdfWriter()
+    for page in reader.pages:
+        if page.rotation != 0:
+            page.transfer_rotation_to_content()
+        writer.add_page(page)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    writer.write(tmp.name)
+    return tmp.name
 
 
 def compute_unit_price(unit_cost, markup, round_unit):
@@ -168,7 +193,26 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes,
     for item in computed:
         row_band = tpl["row_bands_pt"][item["row"] - 1]
         row_top, row_bottom = row_band
+        row_height = row_bottom - row_top
         unit_price_x = cols["unit_price"][1] - padding
+
+        # 客先/仕入先が単価欄に既に手書きの数字を書き込んでいる場合、隣接行に
+        # はみ出ていることがあるため、行の高さの分だけ余分に白塗りしてから
+        # 新しい単価・金額を書く(でないと数字同士が重なって読めなくなる)。
+        c.setFillColorRGB(1, 1, 1)
+        wipe_x0 = cols["unit_price"][0]
+        wipe_x1 = cols["amount"][1] if "amount" in cols else cols["unit_price"][1]
+        wipe_top = row_top - row_height * 0.15
+        wipe_bottom = row_bottom + row_height * 0.85
+        c.rect(
+            wipe_x0,
+            page_height - wipe_bottom,
+            wipe_x1 - wipe_x0,
+            wipe_bottom - wipe_top,
+            fill=1,
+            stroke=0,
+        )
+        c.setFillColorRGB(0, 0, 0)
 
         if isinstance(item["unit_price"], dict):
             labels = list(item["unit_price"].keys())
@@ -218,6 +262,8 @@ def main():
     with open(args.items, encoding="utf-8") as f:
         items = json.load(f)
 
+    pdf_path = normalize_rotation(args.pdf)
+
     reply_to_lines = args.reply_to if args.reply_to else tpl.get("reply_to_lines", [])
     notes = args.note or []
     reply_notes = args.reply_note or []
@@ -244,14 +290,14 @@ def main():
         print("出力を中止しました。")
         sys.exit(0)
 
-    with pdfplumber.open(args.pdf) as plumber_pdf:
+    with pdfplumber.open(pdf_path) as plumber_pdf:
         page = plumber_pdf.pages[args.page]
         page_width, page_height = page.width, page.height
 
     overlay_buf = build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes)
     overlay_reader = pypdf.PdfReader(overlay_buf)
 
-    reader = pypdf.PdfReader(args.pdf)
+    reader = pypdf.PdfReader(pdf_path)
     writer = pypdf.PdfWriter()
     for i, page in enumerate(reader.pages):
         if i == args.page:

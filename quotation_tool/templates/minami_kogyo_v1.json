@@ -10,7 +10,7 @@
     "unit_price": [366.24, 440.4],
     "amount": [440.4, 555.84]
   },
-  "header_redact_pt": [90, 55, 275, 138],
+  "header_redact_pt": [85, 50, 280, 160],
   "reply_to_lines": ["みなみ興業　御中", "南　様"],
   "note_area_pt": [34, 287, 300, 312],
   "reply_note_area_pt": [100, 606, 430, 648],
