@@ -202,12 +202,13 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes,
         row_height = row_bottom - row_top
         unit_price_x = cols["unit_price"][1] - padding
 
-        # 客先/仕入先が単価欄に既に手書きの数字を書き込んでいる場合、隣接行に
-        # はみ出ていることがあるため、行の高さの分だけ余分に白塗りしてから
-        # 新しい単価・金額を書く(でないと数字同士が重なって読めなくなる)。
+        # 客先/仕入先が単価欄に既に手書きの数字(仕入原価の合計等)を書き込んで
+        # いる場合、隣接列(金額列や備考欄)にまではみ出ていることがあるため、
+        # 単価欄より右側の列も含めて白塗りしてから新しい単価を書く
+        # (でないと仕入原価が客先に見えてしまう/数字が重なって読めなくなる)。
         c.setFillColorRGB(1, 1, 1)
         wipe_x0 = cols["unit_price"][0]
-        wipe_x1 = cols["amount"][1] if "amount" in cols else cols["unit_price"][1]
+        wipe_x1 = max(x1 for x0, x1 in cols.values() if x0 >= cols["unit_price"][0])
         wipe_top = row_top - row_height * 0.15
         wipe_bottom = row_bottom + row_height * 0.85
         c.rect(
