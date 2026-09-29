@@ -155,9 +155,15 @@ def draw_note_block(c, area, texts, page_height, fontsize=11):
         c.drawString(x0, page_height - baseline_from_top, text)
 
 
-def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes):
+def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes, x_offset=0.0, y_offset=0.0):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(page_width, page_height))
+    if x_offset or y_offset:
+        # 同じ客先・同じ帳票でも、FAX送信のたびに用紙が数ポイント単位で
+        # ずれて読み込まれることがある(テンプレート較正時の基準とのズレ)。
+        # 一つずつ座標を補正する代わりに、キャンバス全体を平行移動して
+        # まとめて補正する。
+        c.translate(x_offset, y_offset)
 
     redact = tpl.get("header_redact_pt")
     if redact:
@@ -255,6 +261,14 @@ def main():
         help="表内の特定の行(材質・寸法欄)に書き加える備考。'行番号:テキスト' の形式で指定(複数回指定可)。例: --row-note '10:別途 運賃:混載便4,500円 または チャーター便47,000円'",
     )
     parser.add_argument("--yes", action="store_true", help="確認プロンプトをスキップする")
+    parser.add_argument(
+        "--x-offset",
+        type=float,
+        default=0.0,
+        help="書き込み位置全体の水平補正(pt、既定0)。同じ客先・同じ様式でも送信ごとに用紙が数pt単位でずれて"
+        "読み込まれることがあるため、生成結果を見てずれていたら調整する",
+    )
+    parser.add_argument("--y-offset", type=float, default=0.0, help="書き込み位置全体の垂直補正(pt、既定0)")
     args = parser.parse_args()
 
     with open(args.template, encoding="utf-8") as f:
@@ -294,7 +308,10 @@ def main():
         page = plumber_pdf.pages[args.page]
         page_width, page_height = page.width, page.height
 
-    overlay_buf = build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes)
+    overlay_buf = build_overlay(
+        computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes,
+        x_offset=args.x_offset, y_offset=args.y_offset,
+    )
     overlay_reader = pypdf.PdfReader(overlay_buf)
 
     reader = pypdf.PdfReader(pdf_path)
