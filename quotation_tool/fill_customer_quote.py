@@ -56,9 +56,13 @@ def normalize_rotation(pdf_path):
 
     writer = pypdf.PdfWriter()
     for page in reader.pages:
+        writer.add_page(page)
+    # pypdf 7.0+ ではページをwriterに登録してからでないと
+    # transfer_rotation_to_content() が呼べない(writer未登録ページへの
+    # replace_contents()は廃止された)ため、add_page後のページに対して行う。
+    for page in writer.pages:
         if page.rotation != 0:
             page.transfer_rotation_to_content()
-        writer.add_page(page)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     writer.write(tmp.name)
@@ -155,7 +159,7 @@ def draw_note_block(c, area, texts, page_height, fontsize=11):
         c.drawString(x0, page_height - baseline_from_top, text)
 
 
-def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes, x_offset=0.0, y_offset=0.0):
+def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes, x_offset=0.0, y_offset=0.0, redact_boxes=None):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(page_width, page_height))
     if x_offset or y_offset:
@@ -164,6 +168,14 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes,
         # 一つずつ座標を補正する代わりに、キャンバス全体を平行移動して
         # まとめて補正する。
         c.translate(x_offset, y_offset)
+
+    for x0, y0_top, x1, y1_bottom in redact_boxes or []:
+        # テンプレートに定義のない場所(文末の仕入先署名など)を白塗りするための
+        # 汎用レダクション。帳票ごとに位置が変わるので固定のテンプレート項目
+        # にはせず、都度 --redact-box で座標指定する。
+        c.setFillColorRGB(1, 1, 1)
+        c.rect(x0, page_height - y1_bottom, x1 - x0, y1_bottom - y0_top, fill=1, stroke=0)
+        c.setFillColorRGB(0, 0, 0)
 
     redact = tpl.get("header_redact_pt")
     if redact:
@@ -196,20 +208,23 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes,
             y_center = page_height - (row_top + row_bottom) / 2 - 3
             c.drawString(row_note_x0 + 2, y_center, text)
 
+    # 白塗りとテキスト描画は行ごとに交互に行わない(2パスに分ける)。ある行の
+    # 白塗りが上下の行にはみ出す設計になっているため、1行ずつ「白塗り→書く」
+    # を繰り返すと、後の行の白塗りが前の行に書いたばかりの文字を消してしまう。
     for item in computed:
         row_band = tpl["row_bands_pt"][item["row"] - 1]
         row_top, row_bottom = row_band
         row_height = row_bottom - row_top
-        unit_price_x = cols["unit_price"][1] - padding
 
         # 客先/仕入先が単価欄に既に手書きの数字(仕入原価の合計等)を書き込んで
-        # いる場合、隣接列(金額列や備考欄)にまではみ出ていることがあるため、
-        # 単価欄より右側の列も含めて白塗りしてから新しい単価を書く
-        # (でないと仕入原価が客先に見えてしまう/数字が重なって読めなくなる)。
+        # いる場合、隣接列(金額列や備考欄)や上下の行にまではみ出ていることが
+        # あるため、単価欄より右側の列も含めて広めに白塗りしてから新しい単価
+        # を書く(でないと仕入原価が客先に見えてしまう/数字が重なって読めなく
+        # なる)。
         c.setFillColorRGB(1, 1, 1)
         wipe_x0 = cols["unit_price"][0]
         wipe_x1 = max(x1 for x0, x1 in cols.values() if x0 >= cols["unit_price"][0])
-        wipe_top = row_top - row_height * 0.15
+        wipe_top = row_top - row_height * 0.6
         wipe_bottom = row_bottom + row_height * 0.85
         c.rect(
             wipe_x0,
@@ -219,7 +234,12 @@ def build_overlay(computed, tpl, page_width, page_height, reply_to_lines, notes,
             fill=1,
             stroke=0,
         )
-        c.setFillColorRGB(0, 0, 0)
+    c.setFillColorRGB(0, 0, 0)
+
+    for item in computed:
+        row_band = tpl["row_bands_pt"][item["row"] - 1]
+        row_top, row_bottom = row_band
+        unit_price_x = cols["unit_price"][1] - padding
 
         if isinstance(item["unit_price"], dict):
             labels = list(item["unit_price"].keys())
@@ -270,6 +290,12 @@ def main():
         "読み込まれることがあるため、生成結果を見てずれていたら調整する",
     )
     parser.add_argument("--y-offset", type=float, default=0.0, help="書き込み位置全体の垂直補正(pt、既定0)")
+    parser.add_argument(
+        "--redact-box",
+        action="append",
+        help="テンプレート定義外の箇所を白塗りする(文末の仕入先署名など)。'x0,y0,x1,y1' をpt単位・ページ上端"
+        "からの距離で指定(複数回指定可)。例: --redact-box '0,635,380,690'",
+    )
     args = parser.parse_args()
 
     with open(args.template, encoding="utf-8") as f:
@@ -278,6 +304,8 @@ def main():
         items = json.load(f)
 
     pdf_path = normalize_rotation(args.pdf)
+
+    redact_boxes = [tuple(float(v) for v in box.split(",")) for box in (args.redact_box or [])]
 
     reply_to_lines = args.reply_to if args.reply_to else tpl.get("reply_to_lines", [])
     notes = args.note or []
@@ -311,16 +339,17 @@ def main():
 
     overlay_buf = build_overlay(
         computed, tpl, page_width, page_height, reply_to_lines, notes, reply_notes, row_notes,
-        x_offset=args.x_offset, y_offset=args.y_offset,
+        x_offset=args.x_offset, y_offset=args.y_offset, redact_boxes=redact_boxes,
     )
     overlay_reader = pypdf.PdfReader(overlay_buf)
 
     reader = pypdf.PdfReader(pdf_path)
     writer = pypdf.PdfWriter()
-    for i, page in enumerate(reader.pages):
-        if i == args.page:
-            page.merge_page(overlay_reader.pages[0])
+    for page in reader.pages:
         writer.add_page(page)
+    # pypdf 7.0+ ではwriterに登録済みのページでないとmerge_page()が使えない
+    # ため、add_page後のページに対してマージする。
+    writer.pages[args.page].merge_page(overlay_reader.pages[0])
 
     with open(args.output, "wb") as f:
         writer.write(f)
