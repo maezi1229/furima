@@ -1,0 +1,26 @@
+{
+  "_comment": "有限会社みなみ興業からの「見積り依頼」FAX用紙のレイアウト定義。座標はPDFポイント単位、ページ上端からの距離(pdfplumber/top基準)。fill_customer_quote.py / read_request.py で使用する。",
+  "page_width_pt": 595.2,
+  "page_height_pt": 841.92,
+  "render_resolution": 300,
+  "columns_pt": {
+    "material": [33.84, 138.72],
+    "dimension": [138.72, 317.76],
+    "qty": [317.76, 366.24],
+    "unit_price": [366.24, 440.4],
+    "amount": [440.4, 555.84]
+  },
+  "header_redact_pt": [85, 50, 280, 160],
+  "reply_to_lines": ["みなみ興業　御中", "南　様"],
+  "note_area_pt": [34, 287, 300, 312],
+  "reply_note_area_pt": [100, 606, 430, 648],
+  "header_band_pt": [313.44, 338.64],
+  "row_bands_pt": [
+    [338.64, 364.32],
+    [364.32, 389.52],
+    [389.52, 415.2],
+    [415.2, 440.88],
+    [440.88, 466.56],
+    [466.56, 492.0]
+  ]
+}
